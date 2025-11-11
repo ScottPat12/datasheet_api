@@ -18,7 +18,7 @@ except Exception as e:
 
 # Pre-compute search blobs
 def make_search_blob(row):
-    return " ".join(str(v).lower() for v in row.values())
+    return " ".join(str(v).lower() for v in row.values)
 
 df_items["__search_blob"] = df_items.apply(make_search_blob, axis=1)
 

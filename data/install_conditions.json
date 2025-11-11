@@ -1,0 +1,62 @@
+[
+  {
+    "InstallConditionID":1,
+    "Description":"Unenclosed, Spaced"
+  },
+  {
+    "InstallConditionID":2,
+    "Description":"Unenclosed, Spaced from surface"
+  },
+  {
+    "InstallConditionID":3,
+    "Description":"Unenclosed, Touching"
+  },
+  {
+    "InstallConditionID":4,
+    "Description":"Unenclosed, Exposed to sun"
+  },
+  {
+    "InstallConditionID":5,
+    "Description":"Enclosed, Wiring enclosure in air"
+  },
+  {
+    "InstallConditionID":6,
+    "Description":"Thermal insulation, Partially surrounded"
+  },
+  {
+    "InstallConditionID":7,
+    "Description":"Thermal insulation, Completely surrounded"
+  },
+  {
+    "InstallConditionID":8,
+    "Description":"Buried, Direct"
+  },
+  {
+    "InstallConditionID":9,
+    "Description":"Buried, Underground wiring enclosure, One duct"
+  },
+  {
+    "InstallConditionID":10,
+    "Description":"Buried, Underground wiring enclosure, Single-way ducts"
+  },
+  {
+    "InstallConditionID":11,
+    "Description":"Thermal insulation, Partially surrounded, Unenclosed"
+  },
+  {
+    "InstallConditionID":12,
+    "Description":"Thermal insulation, Partially surrounded, in a wiring enclosure"
+  },
+  {
+    "InstallConditionID":13,
+    "Description":"Thermal insulation, Completely surrounded, Unenclosed"
+  },
+  {
+    "InstallConditionID":14,
+    "Description":"Thermal insulation, Completely surrounded, in a wiring enclosure"
+  },
+  {
+    "InstallConditionID":15,
+    "Description":"Buried, Underground wiring enclosure"
+  }
+]

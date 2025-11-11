@@ -4,9 +4,8 @@ import os
 
 app = Flask(__name__)
 
-# Load items from CSV
+# Load CSV on startup
 DATA_PATH = os.getenv("ITEMS_CSV_PATH", "data/Items.csv")
-
 try:
     df_items = pd.read_csv(DATA_PATH, dtype=str).fillna("")
 except Exception as e:
@@ -14,19 +13,28 @@ except Exception as e:
 
 # Fields to search through
 SEARCHABLE_FIELDS = [
-    "Stock Code",
-    "Name",
-    "Short description",
-    "Marketing description",
-    "Applications",
-    "Benefits"
+    "Stock Code", "Name", "Short description",
+    "Marketing description", "Applications", "Benefits"
 ]
 
-@app.route("/search_items")
+@app.route("/items/by_code")
+def get_item_by_code():
+    """Lookup a single item by Stock Code"""
+    code = request.args.get("q", "").strip().lower()
+    if not code:
+        return jsonify({"error": "Missing 'q' parameter"}), 400
+
+    match = df_items[df_items["Stock Code"].str.lower() == code]
+    if match.empty:
+        return jsonify({"error": f"No item found for code '{code}'"}), 404
+
+    return jsonify(match.iloc[0].to_dict())
+
+@app.route("/items/search")
 def search_items():
-    """Search for items by query string across specific fields"""
+    """Search across predefined fields"""
     query = request.args.get("q", "").strip().lower()
-    limit = int(request.args.get("limit", 5))
+    limit = int(request.args.get("limit", 10))
 
     if not query:
         return jsonify({"error": "Missing 'q' search parameter"}), 400
@@ -48,7 +56,6 @@ def search_items():
 
 @app.route("/healthz")
 def health_check():
-    """Basic health check endpoint"""
     return jsonify({"ok": True})
 
 if __name__ == "__main__":

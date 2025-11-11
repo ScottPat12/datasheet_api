@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-import pandas as pd, os, datetime, re
+import pandas as pd, os, datetime, re, json
 from difflib import SequenceMatcher
 
 app = Flask(__name__)
@@ -9,6 +9,7 @@ DATA_PATH = os.getenv("ITEMS_CSV_PATH", "data/Items.csv")
 API_KEY = os.getenv("API_KEY", None)
 LOG_PATH = "logs/queries.csv"
 FUZZY_THRESHOLD = 0.85
+DATA_DIR = "data"
 
 # === LOAD DATA ===================================================
 try:
@@ -16,13 +17,27 @@ try:
 except Exception as e:
     raise RuntimeError(f"Failed to load items file: {e}")
 
-# Pre-compute search blobs
 def make_search_blob(row):
     return " ".join(str(v).lower() for v in row.values)
 
 df_items["__search_blob"] = df_items.apply(make_search_blob, axis=1)
 
-# === HELPER FUNCTIONS ============================================
+# === LOAD JSON DATASETS ==========================================
+def load_json(filename):
+    path = os.path.join(DATA_DIR, filename)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            print(f"✅ Loaded {filename}")
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ Failed to load {filename}: {e}")
+        return []
+
+cables = load_json("cables.json")
+install_conditions = load_json("install_conditions.json")
+ranking = load_json("ranking.json")
+
+# === HELPERS =====================================================
 def classify_user_intent(query: str) -> str:
     q = query.lower()
     if any(t in q for t in ["what is", "part number", "code "]): return "product_lookup"
@@ -35,10 +50,12 @@ def classify_user_intent(query: str) -> str:
 def calc_relevance(blob: str, terms):
     exact = fuzzy = 0.0
     for t in terms:
-        if t in blob: exact += 2
+        if t in blob:
+            exact += 2
         else:
             best = max((SequenceMatcher(None, t, w).ratio() for w in blob.split()), default=0)
-            if best >= FUZZY_THRESHOLD: fuzzy += best
+            if best >= FUZZY_THRESHOLD:
+                fuzzy += best
     return exact + fuzzy
 
 def log_query(q, intent, results):
@@ -57,6 +74,10 @@ def require_api_key():
             return jsonify({"error": "Unauthorized"}), 401
 
 # === ROUTES ======================================================
+@app.route("/")
+def home():
+    return jsonify({"message": "FirstFlex Datasheet API is running."})
+
 @app.route("/items/search")
 def search_items():
     q = request.args.get("q", "").strip()
@@ -94,19 +115,35 @@ def by_code():
 
 @app.route("/ask", methods=["POST"])
 def ask_semantic():
-    """
-    Phase 2 placeholder – will use vector index later.
-    Currently proxies to /items/search.
-    """
     data = request.get_json(force=True)
     query = data.get("query", "")
     limit = data.get("limit", 5)
     with app.test_request_context(f"/items/search?q={query}&limit={limit}"):
         return search_items()
 
+@app.route("/data/cables")
+def get_cables():
+    return jsonify(cables)
+
+@app.route("/data/install_conditions")
+def get_install_conditions():
+    return jsonify(install_conditions)
+
+@app.route("/data/ranking")
+def get_ranking():
+    return jsonify(ranking)
+
 @app.route("/healthz")
 def healthz():
-    return jsonify({"ok": True, "records": len(df_items)})
+    return jsonify({
+        "ok": True,
+        "records": len(df_items),
+        "datasets": {
+            "cables": len(cables),
+            "install_conditions": len(install_conditions),
+            "ranking": len(ranking)
+        }
+    })
 
 # === RUN =========================================================
 if __name__ == "__main__":

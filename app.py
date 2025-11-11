@@ -1,176 +1,113 @@
 from flask import Flask, request, jsonify
-import pandas as pd
-import os, re
-from typing import List
+import pandas as pd, os, datetime, re
+from difflib import SequenceMatcher
 
 app = Flask(__name__)
 
-# ---------- Config ----------
-CSV_PATH = os.getenv("ITEMS_CSV_PATH", "data/Items.csv")
-SEARCHABLE_FIELDS_DEFAULT = [
-    "Stock Code",
-    "Name",
-    "Short description",
-    "Marketing description",
-    "Applications",
-    "Benefits",
-]
-STOP_WORDS = {"the","and","for","of","a","in","to","on","at","with","by"}
+# === CONFIG ======================================================
+DATA_PATH = os.getenv("ITEMS_CSV_PATH", "data/Items.csv")
+API_KEY = os.getenv("API_KEY", None)
+LOG_PATH = "logs/queries.csv"
+FUZZY_THRESHOLD = 0.85
 
-# Try common datasheet column names (first one found will be used when highlighting)
-DATASHEET_CANDIDATES = [
-    "Data sheet","Data Sheet","Datasheet","Datasheet URL","Data sheet URL","DataSheet","Data_Sheet"
-]
-
-# ---------- Helpers ----------
-def normalize_code(s: str) -> str:
-    """Uppercase and remove spaces, dashes, dots, underscores and slashes."""
-    if not isinstance(s, str):
-        return ""
-    return re.sub(r"[ \-._/]+", "", s).upper()
-
-def tokenize(q: str) -> List[str]:
-    q = q.lower()
-    q = re.sub(r"[^a-z0-9\s,]+", " ", q)
-    parts = [p for p in re.split(r"[,\s]+", q) if p]
-    # dedupe and stop-word filter (preserve order)
-    seen, out = set(), []
-    for t in parts:
-        if t in STOP_WORDS: 
-            continue
-        if t not in seen:
-            out.append(t); seen.add(t)
-    return out
-
-def clamp(n, lo, hi):
-    return max(lo, min(hi, n))
-
-# ---------- Load CSV + build index ----------
+# === LOAD DATA ===================================================
 try:
-    df = pd.read_csv(CSV_PATH, dtype=str).fillna("")
+    df_items = pd.read_csv(DATA_PATH, dtype=str).fillna("")
 except Exception as e:
-    raise RuntimeError(f"Failed to load items file from {CSV_PATH}: {e}")
+    raise RuntimeError(f"Failed to load items file: {e}")
 
-# Ensure expected columns exist
-cols_lower = {c.lower(): c for c in df.columns}
-if "stock code".lower() not in cols_lower:
-    raise RuntimeError(f"'Stock Code' column not found. Columns present: {list(df.columns)}")
+# Pre-compute search blobs
+def make_search_blob(row):
+    return " ".join(str(v).lower() for v in row.values())
 
-# Decide searchable fields (only keep those that actually exist)
-SEARCHABLE_FIELDS = [c for c in SEARCHABLE_FIELDS_DEFAULT if c in df.columns]
-if not SEARCHABLE_FIELDS:
-    # fallback: search everything
-    SEARCHABLE_FIELDS = list(df.columns)
+df_items["__search_blob"] = df_items.apply(make_search_blob, axis=1)
 
-# Datasheet column (first candidate that exists)
-DATASHEET_COL = next((c for c in DATASHEET_CANDIDATES if c in df.columns), None)
+# === HELPER FUNCTIONS ============================================
+def classify_user_intent(query: str) -> str:
+    q = query.lower()
+    if any(t in q for t in ["what is", "part number", "code "]): return "product_lookup"
+    if any(t in q for t in ["voltage", "amp", "halogen", "rating"]): return "attribute_query"
+    if any(t in q for t in ["alternative", "replace", "equivalent"]): return "substitute_search"
+    if any(t in q for t in ["suitable for", "use for", "outdoor", "underground"]): return "application"
+    if any(t in q for t in ["standard", "as/nzs", "compliant"]): return "regulation"
+    return "general"
 
-# Precompute normalized code and a lowercase "blob" for each row for fast search
-def row_blob(row) -> str:
-    parts = []
-    for c in SEARCHABLE_FIELDS:
-        parts.append(str(row.get(c, "")))
-    blob = " ".join(parts).lower()
-    # normalize whitespace and strip non-alnum except space
-    blob = re.sub(r"[^a-z0-9\s]+", " ", blob)
-    blob = re.sub(r"\s+", " ", blob).strip()
-    return blob
+def calc_relevance(blob: str, terms):
+    exact = fuzzy = 0.0
+    for t in terms:
+        if t in blob: exact += 2
+        else:
+            best = max((SequenceMatcher(None, t, w).ratio() for w in blob.split()), default=0)
+            if best >= FUZZY_THRESHOLD: fuzzy += best
+    return exact + fuzzy
 
-df = df.copy()
-df["__code_norm"] = df["Stock Code"].map(normalize_code)
-df["__blob"] = df.apply(row_blob, axis=1)
+def log_query(q, intent, results):
+    try:
+        os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.datetime.utcnow()},{q},{intent},{len(results)}\n")
+    except Exception as e:
+        print("Log error:", e)
 
-# Quick exact lookup map by normalized code
-code_index = {row["__code_norm"]: i for i, row in df.iterrows()}
+# === SECURITY ====================================================
+@app.before_request
+def require_api_key():
+    if request.path not in ("/", "/healthz"):
+        if API_KEY and request.headers.get("X-API-Key") != API_KEY:
+            return jsonify({"error": "Unauthorized"}), 401
 
-# ---------- Endpoints ----------
-@app.get("/items/by_code")
-def by_code():
-    """Exact Stock Code lookup (format-insensitive). ?q=CODE"""
-    raw = (request.args.get("q") or "").strip()
-    if not raw:
-        return jsonify({"error": "Missing 'q' parameter"}), 400
-
-    key = normalize_code(raw)
-    idx = code_index.get(key)
-    if idx is None:
-        return jsonify({"error": f"No item found for code '{raw}'"}), 404
-
-    item = df.iloc[idx].drop(labels=["__code_norm","__blob"]).to_dict()
-    return jsonify({
-        "query": raw,
-        "match_type": "exact",
-        "result": item
-    })
-
-@app.get("/items/search")
-def search():
-    """
-    Keyword search across key fields.
-    ?q=words&limit=10
-    Returns ranked results with score and matched_terms.
-    """
-    q = (request.args.get("q") or "").strip()
+# === ROUTES ======================================================
+@app.route("/items/search")
+def search_items():
+    q = request.args.get("q", "").strip()
+    limit = int(request.args.get("limit", 10))
     if not q:
-        return jsonify({"error": "Missing 'q' search parameter"}), 400
-    if len(q) > 200:
-        return jsonify({"error": "Query too long (max 200 chars)"}), 400
+        return jsonify({"error": "Missing q"}), 400
 
-    limit = clamp(int(request.args.get("limit", 10)), 1, 25)
-    terms = tokenize(q)
-    if not terms:
-        return jsonify({"error": "Your query had no meaningful terms after filtering."}), 400
-
-    scored = []
-    for i, row in df.iterrows():
-        blob = row["__blob"]
-        # score = total occurrences of all terms in blob
-        score = 0
-        matched_terms = []
-        for t in terms:
-            cnt = blob.count(t)
-            if cnt > 0:
-                score += cnt
-                matched_terms.append(t)
+    intent = classify_user_intent(q)
+    terms = [t.lower() for t in re.split(r"[\s,;]+", q) if t]
+    results = []
+    for _, row in df_items.iterrows():
+        score = calc_relevance(row["__search_blob"], terms)
         if score > 0:
-            scored.append((score, matched_terms, i))
-
-    if not scored:
-        return jsonify({
-            "query": q,
-            "count": 0,
-            "results": []
-        }), 200
-
-    scored.sort(key=lambda x: (-x[0], x[2]))  # score desc, original order tie-break
-    top = scored[:limit]
-
-    out = []
-    for rank, (score, matched_terms, i) in enumerate(top, start=1):
-        rec = df.iloc[i].drop(labels=["__code_norm","__blob"]).to_dict()
-        out.append({
-            "rank": rank,
-            "score": score,
-            "matched_terms": matched_terms,
-            "record": rec
-        })
-
+            results.append({"product": row.to_dict(), "score": round(score, 2)})
+    results.sort(key=lambda r: -r["score"])
+    results = results[:limit]
+    log_query(q, intent, results)
+    confidence = min(0.4 + 0.1 * len(results), 0.9)
     return jsonify({
-        "query": q,
-        "count": len(out),
-        "results": out
+        "query": q, "intent": intent,
+        "confidence": round(confidence, 2),
+        "count": len(results),
+        "results": [r["product"] for r in results]
     })
 
-@app.get("/healthz")
+@app.route("/items/by_code")
+def by_code():
+    q = request.args.get("q", "").strip().lower()
+    if not q:
+        return jsonify({"error": "Missing q"}), 400
+    match = df_items[df_items["Stock Code"].str.lower() == q]
+    if match.empty:
+        return jsonify({"error": f"No item for code {q}"}), 404
+    return jsonify(match.iloc[0].to_dict())
+
+@app.route("/ask", methods=["POST"])
+def ask_semantic():
+    """
+    Phase 2 placeholder – will use vector index later.
+    Currently proxies to /items/search.
+    """
+    data = request.get_json(force=True)
+    query = data.get("query", "")
+    limit = data.get("limit", 5)
+    with app.test_request_context(f"/items/search?q={query}&limit={limit}"):
+        return search_items()
+
+@app.route("/healthz")
 def healthz():
-    return jsonify({
-        "ok": True,
-        "rows": int(df.shape[0]),
-        "columns": list(df.columns.drop(["__code_norm","__blob"])),
-        "datasheet_column": DATASHEET_COL,
-        "searchable_fields": SEARCHABLE_FIELDS
-    })
+    return jsonify({"ok": True, "records": len(df_items)})
 
+# === RUN =========================================================
 if __name__ == "__main__":
-    # For local dev; on Render use: gunicorn app:app
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    app.run(host="0.0.0.0", port=8000)

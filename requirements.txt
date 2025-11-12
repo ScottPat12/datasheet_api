@@ -3,3 +3,4 @@ gunicorn==21.*
 pandas==2.*
 python-dotenv
 openpyxl
+rapidfuzz

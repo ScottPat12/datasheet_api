@@ -24,7 +24,7 @@ def norm_mm2(text: str) -> str:
 def normalize_code(text: str) -> str:
     """
     Aggressive code normalization so these all align:
-    MC05/2.5, MC05 2.5, MC05-2.5, mc05 2.5mm²  → mc052p5 (and lowercased)
+    MC05/2.5, MC05 2.5, MC05-2.5, mc05 2.5mm² → mc052p5 (and lowercased)
     Rules:
       - lowercase
       - normalize mm² tokens to mm2
@@ -51,11 +51,11 @@ def code_aliases(raw_code: str):
     dotted_p = low.replace(".", "p")
     normalized = normalize_code(raw)
 
-    # de-dup while preserving order
     seen, aliases = set(), []
     for cand in [low, no_space, no_hyphen, no_slash, dotted_p, normalized]:
         if cand and cand not in seen:
-            aliases.append(cand); seen.add(cand)
+            aliases.append(cand)
+            seen.add(cand)
     return aliases
 
 def tokenize(query: str):
@@ -67,16 +67,13 @@ try:
 except Exception as e:
     raise RuntimeError(f"Failed to load items file: {e}")
 
-# compute code aliases + normalized columns
 if "Stock Code" not in df_items.columns:
-    # fail fast with a helpful message
     raise RuntimeError("Items.csv must include a 'Stock Code' column.")
 
 df_items["__code_raw"]  = df_items["Stock Code"].str.strip().str.lower()
 df_items["__code_norm"] = df_items["Stock Code"].apply(normalize_code)
 df_items["__code_aliases"] = df_items["Stock Code"].apply(code_aliases)
 
-# Pre-compute search blobs (include aliases to boost discoverability)
 def make_search_blob(row):
     base = " ".join(str(v).lower() for v in row.values)
     ali  = " ".join(row["__code_aliases"])
@@ -84,7 +81,7 @@ def make_search_blob(row):
 
 df_items["__search_blob"] = df_items.apply(make_search_blob, axis=1)
 
-# === INTENT & SCORING ===========================================
+# === INTENT & SCORING ============================================
 def classify_user_intent(query: str) -> str:
     q = (query or "").lower()
     if any(t in q for t in ["what is", "part number", "code "]): return "product_lookup"
@@ -105,10 +102,6 @@ def best_similarity(token: str, words_iter):
     return best
 
 def calc_relevance(row, terms):
-    """
-    Combined exact + fuzzy score.
-    Heavy boost if term matches code aliases (esp normalized forms).
-    """
     blob = row["__search_blob"]
     words = blob.split()
     aliases = row["__code_aliases"]
@@ -118,26 +111,22 @@ def calc_relevance(row, terms):
         tl = t.lower()
         tn = normalize_code(t)
 
-        # 1) Code alias matches (highest weight)
         if tl in aliases or tn in aliases:
             score += 6.0
             continue
-        # fuzzy on aliases
+
         sim_alias = max(best_similarity(tl, aliases), best_similarity(tn, aliases))
         if sim_alias >= CODE_FUZZY_THRESHOLD:
             score += 3.5
             continue
 
-        # 2) General exact match in blob
         if tl in blob:
             score += 2.0
             continue
 
-        # 3) General fuzzy match in blob
         sim = best_similarity(tl, words)
         if sim >= FUZZY_THRESHOLD:
-            score += sim  # fractional bump
-
+            score += sim
     return round(score, 3)
 
 def log_query(q, intent, results_count, extras=None):
@@ -149,7 +138,6 @@ def log_query(q, intent, results_count, extras=None):
         print("Log error:", e)
 
 def compute_confidence(results):
-    # better than simple count-only: blend quantity + average score + top consistency
     if not results:
         return 0.0
     scores = [r["score"] for r in results]
@@ -166,7 +154,6 @@ def compute_confidence(results):
 # === SECURITY ====================================================
 @app.before_request
 def require_api_key():
-    # You said you’re not using API key right now; leave hook but allow all.
     if False and request.path not in ("/", "/healthz"):
         if API_KEY and request.headers.get("X-API-Key") != API_KEY:
             return jsonify({"error": "Unauthorized"}), 401
@@ -181,8 +168,6 @@ def search_items():
 
     intent = classify_user_intent(q)
     terms = tokenize(q)
-
-    # also push normalized code-like tokens so "MC05/2.5" aligns with "MC05 2.5"
     terms_norm = list({normalize_code(t) for t in terms if t})
     terms_all = terms + terms_norm
 
@@ -198,7 +183,8 @@ def search_items():
 
     log_query(q, intent, len(results), extras=f"conf={conf}")
     return jsonify({
-        "query": q, "intent": intent,
+        "query": q,
+        "intent": intent,
         "confidence": conf,
         "count": len(results),
         "results": [r["product"] for r in results]
@@ -206,12 +192,6 @@ def search_items():
 
 @app.route("/items/by_code")
 def by_code():
-    """
-    Robust code lookup:
-      1) case-insensitive exact 'Stock Code'
-      2) normalized match against __code_norm
-      3) fuzzy against __code_aliases (suggestions if multiple)
-    """
     q = request.args.get("q", "").strip()
     if not q:
         return jsonify({"error": "Missing q"}), 400
@@ -219,17 +199,14 @@ def by_code():
     q_low = q.lower()
     q_norm = normalize_code(q)
 
-    # 1) exact case-insensitive match
     exact = df_items[df_items["__code_raw"] == q_low]
     if not exact.empty:
         return jsonify(exact.iloc[0].to_dict())
 
-    # 2) normalized match
     normed = df_items[df_items["__code_norm"] == q_norm]
     if not normed.empty:
         return jsonify(normed.iloc[0].to_dict())
 
-    # 3) fuzzy over aliases → collect candidates
     candidates = []
     for _, row in df_items.iterrows():
         aliases = row["__code_aliases"]
@@ -239,19 +216,14 @@ def by_code():
     if len(candidates) == 1:
         return jsonify(candidates[0][1])
     elif len(candidates) > 1:
-        # return top 5 suggestions
         candidates.sort(key=lambda x: -x[0])
         sugg = [{"similarity": round(s, 3), "item": d} for s, d in candidates[:5]]
         return jsonify({"error": f"No exact item for code '{q}'", "suggestions": sugg}), 404
 
-    # nothing found
     return jsonify({"error": f"No item for code '{q}'"}), 404
 
 @app.route("/ask", methods=["POST"])
 def ask_semantic():
-    """
-    Phase 2 placeholder – currently proxies to /items/search.
-    """
     data = request.get_json(force=True)
     query = data.get("query", "")
     limit = data.get("limit", 5)
@@ -261,6 +233,18 @@ def ask_semantic():
 @app.route("/healthz")
 def healthz():
     return jsonify({"ok": True, "records": len(df_items)})
+
+@app.route("/")
+def home():
+    return {
+        "status": "ok",
+        "routes": [
+            "/items/search",
+            "/items/by_code",
+            "/ask (POST)",
+            "/healthz"
+        ]
+    }
 
 # === RUN =========================================================
 if __name__ == "__main__":

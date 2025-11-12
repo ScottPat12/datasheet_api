@@ -4,3 +4,5 @@ wheel
 pandas>=2.2.3
 numpy>=2.1.2
 Cython>=3.0.11
+flask
+gunicorn

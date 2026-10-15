@@ -15,8 +15,115 @@ ITEMS_CSV_PATH = os.getenv("ITEMS_CSV_PATH", "data/Items.csv")
 SERIES_CSV_PATH = os.getenv("SERIES_CSV_PATH", "data/Series.csv")  # optional
 DIRECT_T = float(os.getenv("DIRECT_T", 0.80))
 LIKELY_T = float(os.getenv("LIKELY_T", 0.55))
-API_KEY = os.getenv("API_KEY", "")  # optional; if empty, auth disabled
+API_KEY = os.getenv("API_KEY", "")
+ALLOW_PUBLIC_API = os.getenv("ALLOW_PUBLIC_API", "false").lower() == "true"
 APP_VERSION = os.getenv("APP_VERSION", "v1")
+
+# Only customer-facing catalogue fields may be returned or indexed.
+# New source columns require an explicit publication decision here.
+PUBLIC_ITEM_FIELDS = (
+    'Stock Code',
+    'Main image',
+    'Name',
+    'Parent SKU',
+    'Stock Group',
+    'Category',
+    'Brand',
+    'Cable sub brand',
+    'Series name',
+    'Short description',
+    'Marketing description',
+    'Applications',
+    'Benefits',
+    'Key markets',
+    'Industrial machinery',
+    'Building and construction',
+    'Infrastructure',
+    'Energy',
+    'Marine',
+    'Colour',
+    'Core colour',
+    'Total no. of cores',
+    'No. of cores excl. earth',
+    'No. of earth',
+    'Nominal size (mm²)',
+    'Earth nominal size (mm²)',
+    'AWG',
+    'No. of paired cores',
+    'No. of triple cores',
+    'No. of quad cores',
+    'Approximate stranding No. of wires x mm',
+    'Approximate overall diameter (mm²)',
+    'Rated voltage',
+    'Approx weight per km.value',
+    'Approx weight per km.unitAbbreviation',
+    'Relevant standards',
+    'Suits gland type',
+    'Cable features',
+    'Cable class',
+    'Conductor type',
+    'Insulation',
+    'Sheath',
+    'Material',
+    'Bedding sheath',
+    'Bedding sheath material',
+    'Inner sheath',
+    'Inner sheath material',
+    'Armoured',
+    'Armour material',
+    'Screened',
+    'Screening material',
+    'Laying up',
+    'Laying up configuration',
+    'Separator',
+    'Separator material',
+    'Filler',
+    'Filler material',
+    'Maximum conductor temperature',
+    'Maximum AC operating voltage',
+    'Minimum operating temperature',
+    'Maximum operating temperature',
+    'Minimum operating temperature flexing',
+    'Maximum operating temperature flexing',
+    'Minimum bending radius fixed',
+    'Minimum bending radius flexing',
+    'Additional characteristics',
+    'Product description',
+    'Size.value',
+    'Size.unitAbbreviation',
+    'Approx weight.value',
+    'Approx weight.unitAbbreviation',
+    'Length.value',
+    'Length.unitAbbreviation',
+    'Width.value',
+    'Width.unitAbbreviation',
+    'Height.value',
+    'Height.unitAbbreviation',
+    'Depth.value',
+    'Depth.unitAbbreviation',
+    'Diameter.value',
+    'Diameter.unitAbbreviation',
+    'Thickness.value',
+    'Thickness.unitAbbreviation',
+    'Load bearing capacity.value',
+    'Load bearing capacity.unitAbbreviation',
+    'Ingress Protection (IP)',
+    'Impact resistance (IK)',
+    'Ampage rating',
+    'Hour position',
+    'Male / Femaie',
+    'Terminal type',
+    'Pins',
+    'Lever',
+    'Type of available outlet',
+    'Contact material',
+    'Surface treatment contacts',
+    'Cable entry',
+    'Data sheet',
+    'Compliance document',
+    'Marketing flyer',
+    'Series image',
+)
 
 # Scoring knobs (generic)
 PHRASE_MAX_N = 4
@@ -120,6 +227,9 @@ def load_items(items_csv: str, series_csv: Optional[str]) -> Tuple[pd.DataFrame,
         for c in ["Series name","Short description","Marketing description"]:
             if c not in items.columns: items[c] = ""
 
+    # Drop unapproved fields before building search text, tokens or scores.
+    items = items[[c for c in PUBLIC_ITEM_FIELDS if c in items.columns]].copy()
+
     items["__norm_code"] = items["Stock Code"].map(normalize_code)
     items["__code_prefix"] = items["Stock Code"].map(code_prefix)
 
@@ -184,7 +294,7 @@ def log_event(payload: dict):
 # Security
 # ----------------------------
 def require_key():
-    if not API_KEY: return True
+    if not API_KEY: return ALLOW_PUBLIC_API
     from hmac import compare_digest
     return compare_digest(request.headers.get("X-API-Key", ""), API_KEY)
 
@@ -280,7 +390,7 @@ def generic_score(row, q_tokens):
 # Converters / responses
 # ----------------------------
 def df_row_to_item(row) -> dict:
-    return {c: row[c] for c in _df.columns if not c.startswith("__")}
+    return {c: row[c] for c in PUBLIC_ITEM_FIELDS if c in row}
 
 def suggest_near_codes(norm_q: str, k=3):
     if _df.empty: return []
@@ -427,7 +537,7 @@ def compare_items(items: List[Dict[str, Any]]) -> Dict[str, Any]:
 @app.route("/healthz", methods=["GET"])
 def healthz():
     if _data_load_error:
-        return jsonify({"ok": False, "error": _data_load_error}), 500
+        return jsonify({"ok": False, "error": "product data unavailable"}), 500
     return jsonify({
         "ok": True,
         "records": int(len(_df.index)),
